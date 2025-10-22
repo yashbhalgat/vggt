@@ -230,6 +230,17 @@ class Aggregator(nn.Module):
         # update P because we added special tokens
         _, P, C = tokens.shape
 
+        # Expose context for external hooks (e.g., attention visualization)
+        # P_frame: tokens per frame after adding special tokens
+        # HW_patches: (H/patch_size, W/patch_size) used for reshaping patch attentions
+        self._attn_context = {
+            "B": B,
+            "S": S,
+            "P_frame": P,
+            "patch_start_idx": self.patch_start_idx,
+            "HW_patches": (H // self.patch_size, W // self.patch_size),
+        }
+
         frame_idx = 0
         global_idx = 0
         output_list = []

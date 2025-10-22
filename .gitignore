@@ -1,5 +1,7 @@
+.gradio/
 .hydra/
 output/
+attn_outputs*/
 ckpt/
 # Byte-compiled / optimized / DLL files
 __pycache__/

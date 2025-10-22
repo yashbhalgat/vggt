@@ -7,6 +7,7 @@
 import os
 import torch
 import numpy as np
+from typing import Tuple
 
 
 from vggt.dependency.distortion import apply_distortion, iterative_undistortion, single_undistortion
@@ -35,8 +36,11 @@ def unproject_depth_map_to_point_map(
 
     world_points_list = []
     for frame_idx in range(depth_map.shape[0]):
+        cur_depth = depth_map[frame_idx]
+        if cur_depth.ndim == 3 and cur_depth.shape[-1] == 1:
+            cur_depth = np.squeeze(cur_depth, axis=-1)
         cur_world_points, _, _ = depth_to_world_coords_points(
-            depth_map[frame_idx].squeeze(-1), extrinsics_cam[frame_idx], intrinsics_cam[frame_idx]
+            cur_depth, extrinsics_cam[frame_idx], intrinsics_cam[frame_idx]
         )
         world_points_list.append(cur_world_points)
     world_points_array = np.stack(world_points_list, axis=0)
@@ -49,7 +53,7 @@ def depth_to_world_coords_points(
     extrinsic: np.ndarray,
     intrinsic: np.ndarray,
     eps=1e-8,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Convert a depth map to world coordinates.
 
@@ -59,7 +63,8 @@ def depth_to_world_coords_points(
         extrinsic (np.ndarray): Camera extrinsic matrix of shape (3, 4). OpenCV camera coordinate convention, cam from world.
 
     Returns:
-        tuple[np.ndarray, np.ndarray]: World coordinates (H, W, 3) and valid depth mask (H, W).
+        Tuple[np.ndarray, np.ndarray, np.ndarray]:
+            World coordinates (H, W, 3), camera coordinates (H, W, 3), valid depth mask (H, W).
     """
     if depth_map is None:
         return None, None, None
@@ -84,7 +89,7 @@ def depth_to_world_coords_points(
     return world_coords_points, cam_coords_points, point_mask
 
 
-def depth_to_cam_coords_points(depth_map: np.ndarray, intrinsic: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def depth_to_cam_coords_points(depth_map: np.ndarray, intrinsic: np.ndarray) -> np.ndarray:
     """
     Convert a depth map to camera coordinates.
 
@@ -93,7 +98,7 @@ def depth_to_cam_coords_points(depth_map: np.ndarray, intrinsic: np.ndarray) -> 
         intrinsic (np.ndarray): Camera intrinsic matrix of shape (3, 3).
 
     Returns:
-        tuple[np.ndarray, np.ndarray]: Camera coordinates (H, W, 3)
+        np.ndarray: Camera coordinates (H, W, 3)
     """
     H, W = depth_map.shape
     assert intrinsic.shape == (3, 3), "Intrinsic matrix must be 3x3"

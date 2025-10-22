@@ -47,6 +47,10 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope
 
+        # Optional external callback for inspecting attention inputs (q, k, v)
+        # Signature: fn(q, k, v, module=self)
+        self.attn_callback = None
+
     def forward(self, x: Tensor, pos=None) -> Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
@@ -56,6 +60,14 @@ class Attention(nn.Module):
         if self.rope is not None:
             q = self.rope(q, pos)
             k = self.rope(k, pos)
+
+        # Invoke inspection callback, if any (non-disruptive)
+        if self.attn_callback is not None:
+            try:
+                self.attn_callback(q, k, v, self)
+            except Exception:
+                # Swallow callback errors to avoid disrupting training/inference
+                pass
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
