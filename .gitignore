@@ -2,6 +2,7 @@
 .hydra/
 output/
 attn_outputs*/
+attn_first2all*/
 ckpt/
 # Byte-compiled / optimized / DLL files
 __pycache__/

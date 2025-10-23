@@ -48,23 +48,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--image_set_name", type=str, default="kitchen")
     parser.add_argument("--num_images", type=int, default=5)
-    parser.add_argument("--output_dir", type=str, default="attn_outputs_first2all")
+    parser.add_argument("--output_dir_prefix", type=str, default="attn_first2all_")
     args = parser.parse_args()
+    
+    output_dir = args.output_dir_prefix + args.image_set_name
     
     model = load_model()
     
     image_dir = Path(f"examples/{args.image_set_name}/images")
-    all_image_names = [image_dir / f for f in image_dir.glob("*.png")]
+    all_image_names = [f for f in image_dir.glob("*.png")]
     step = len(all_image_names) // args.num_images
     # take every step-th image
     image_names = [str(all_image_names[i]) for i in range(0, len(all_image_names), step)]
     images = load_images(image_names)
     
     # copy images to output_dir / images
-    os.makedirs(Path(args.output_dir) / "images", exist_ok=True)
+    os.makedirs(Path(output_dir) / "images", exist_ok=True)
     for image_name in image_names:
-        shutil.copy(image_name, Path(args.output_dir) / "images" / os.path.basename(image_name))
+        shutil.copy(image_name, Path(output_dir) / "images" / os.path.basename(image_name))
     
-    saved_first2all = compute_layerwise_attentions(model, images, args.image_set_name, args.output_dir)
+    saved_first2all = compute_layerwise_attentions(model, images, args.image_set_name, output_dir)
     print(saved_first2all)
     
