@@ -6,6 +6,8 @@ Interactive, layer-wise visualization of VGGT global attention.
 - Compact per-layer artifacts (low‑res heatmaps normalized by layer 99th percentile)
 - A Gradio UI to click any query patch and see per‑frame overlays
 
+<img width="1658" height="933" alt="Selection_652" src="https://github.com/user-attachments/assets/240002eb-1962-4093-becd-ebbd6a671c01" />
+
 ---
 
 
