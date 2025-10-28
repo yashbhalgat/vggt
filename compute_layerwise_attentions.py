@@ -188,6 +188,7 @@ def compute_layerwise_attentions(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--image_set_name", type=str, default="kitchen")
+    parser.add_argument("--image_dir", type=str, default=None)
     parser.add_argument("--num_images", type=int, default=5)
     parser.add_argument("--output_dir_prefix", type=str, default="attn_first2all_")
     parser.add_argument("--stride_h", type=int, default=1)
@@ -197,10 +198,15 @@ if __name__ == "__main__":
     output_dir = args.output_dir_prefix + args.image_set_name
     
     model = load_model()
-    
-    image_dir = Path(f"examples/{args.image_set_name}/images")
+
+    if args.image_dir is not None:
+        image_dir = Path(args.image_dir)
+    else:
+        image_dir = Path(f"examples/{args.image_set_name}/images")
+    print(f"Image directory: {image_dir}")
     all_image_names = [f for f in image_dir.glob("*.png")]
     step = len(all_image_names) // args.num_images
+    print(f"Total images: {len(all_image_names)}, step: {step}")
     # take every step-th image
     image_names = [str(all_image_names[i]) for i in range(0, len(all_image_names), step)]
     images = load_images(image_names)
