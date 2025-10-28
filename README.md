@@ -13,9 +13,9 @@ Interactive, layer-wise visualization of VGGT global attention.
 
 ## Key scripts
 
-- `vggt/utils/attn_capture.py` — hook utilities to collect attention during a single forward
-- `compute_layerwise_attentions.py` — runs the model once and exports all layers
-- `visualize_attn_gradio.py` — interactive viewer (click query patch → per‑frame overlays)
+- `vggt/utils/attn_capture.py` - hook utilities to collect attention during a single forward
+- `compute_layerwise_attentions.py` - runs the model once and exports all layers
+- `visualize_attn_gradio.py` - interactive viewer (click query patch → per‑frame overlays)
 
 ---
 
