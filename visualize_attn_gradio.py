@@ -148,6 +148,38 @@ def _click_to_query(x: int, y: int, H_ds: int, W_ds: int, H_img: int, W_img: int
     return qi
 
 
+def _get_vmax_info_html(meta: Dict[str, Any], head_selected: str = "Average") -> str:
+    """Generate vmax info HTML based on metadata and selected head."""
+    per_head = meta.get("per_head_data", False)
+    
+    if not per_head:
+        # Regular averaged data
+        return f"<div style=\"font-size: 48px; font-weight: 800;\">vmax (99%): {meta.get('layer_vmax99', 1.0):.4f}</div>"
+    
+    # Per-head data
+    layer_vmax = meta.get('layer_vmax99', 1.0)
+    per_head_vmaxs = meta.get('per_head_vmax99', [])
+    
+    if not per_head_vmaxs:
+        return f"<div style=\"font-size: 32px; font-weight: 800;\">Layer vmax: {layer_vmax:.4f} (per-head)</div>"
+    
+    if head_selected == "Average":
+        # Show overall statistics
+        min_vmax = min(per_head_vmaxs)
+        max_vmax = max(per_head_vmaxs)
+        return f"<div style=\"font-size: 28px; font-weight: 800;\">Average view<br/>Layer vmax: {layer_vmax:.4f}<br/>Per-head range: {min_vmax:.4f} - {max_vmax:.4f}</div>"
+    else:
+        # Show specific head vmax
+        try:
+            head_idx = int(head_selected.split()[-1]) - 1
+            if 0 <= head_idx < len(per_head_vmaxs):
+                head_vmax = per_head_vmaxs[head_idx]
+                return f"<div style=\"font-size: 36px; font-weight: 800;\">{head_selected}<br/>vmax (99%): {head_vmax:.4f}</div>"
+        except (ValueError, IndexError):
+            pass
+        return f"<div style=\"font-size: 32px; font-weight: 800;\">{head_selected}</div>"
+
+
 def build_interface():
     with gr.Blocks() as demo:
         gr.Markdown("""
@@ -201,14 +233,7 @@ def build_interface():
 
             first_img = Image.open(image_paths[0]).convert("RGB")
             first_img_grid = _draw_grid_on_image(first_img, meta["H_ds"], meta["W_ds"], line_color=(0, 255, 0), alpha=0.6)
-            
-            # Display vmax info
-            per_head_check = meta.get("per_head_data", False)
-            if per_head_check:
-                info = f"<div style=\"font-size: 32px; font-weight: 800;\">Per-head data (renormalized per head in viz)</div>"
-            else:
-                info = f"<div style=\"font-size: 48px; font-weight: 800;\">vmax (99%): {meta.get('layer_vmax99', 1.0):.4f}</div>"
-            
+            info = _get_vmax_info_html(meta, "Average")
             npz_loaded = None
             if data["mode"] == "npz":
                 # Load lazily with mmap (works for both .npz and .npy)
@@ -238,14 +263,7 @@ def build_interface():
             image_paths, data = _resolve_paths(meta, meta_path)
             first_img = Image.open(image_paths[0]).convert("RGB")
             first_img_grid = _draw_grid_on_image(first_img, meta["H_ds"], meta["W_ds"], line_color=(0, 255, 0), alpha=0.6)
-            
-            # Display vmax info
-            per_head = meta.get("per_head_data", False)
-            if per_head:
-                info = f"<div style=\"font-size: 48px; font-weight: 800;\">Per-head normalization</div>"
-            else:
-                info = f"<div style=\"font-size: 48px; font-weight: 800;\">vmax (99%): {meta.get('layer_vmax99', 1.0):.4f}</div>"
-            
+            info = _get_vmax_info_html(meta, "Average")
             npz_loaded = None
             if data["mode"] == "npz":
                 npz_loaded = np.load(data["path"], mmap_mode="r")
@@ -264,6 +282,17 @@ def build_interface():
             fn=on_change_layer,
             inputs=[layer_select, state_layer_map],
             outputs=[img_click, state_meta, state_data, gallery, vmax_html, state_npz, state_image_paths, head_select],
+        )
+
+        def on_change_head(head_name: str, meta: Dict[str, Any]):
+            if meta is None:
+                return gr.update()
+            return _get_vmax_info_html(meta, head_name)
+
+        head_select.change(
+            fn=on_change_head,
+            inputs=[head_select, state_meta],
+            outputs=[vmax_html],
         )
 
         def on_click(img: Image.Image, meta: Dict[str, Any], data_state: Dict[str, Any], opacity_value: float, npz_loaded, image_paths, head_selected: str, evt: gr.SelectData):
