@@ -230,6 +230,7 @@ if __name__ == "__main__":
     # image extension
     parser.add_argument("--image_extension", type=str, default="png")
     parser.add_argument("--save_per_head", action="store_true", help="Save per-head attention maps (increases storage ~16x)")
+    parser.add_argument("--first_image_idx", type=int, default=0, help="Index of image (after sampling) to use as query frame (frame 0)")
     args = parser.parse_args()
     
     output_dir = args.output_dir_prefix + args.image_set_name
@@ -246,6 +247,16 @@ if __name__ == "__main__":
     print(f"Total images: {len(all_image_names)}, step: {step}")
     # take every step-th image
     image_names = [str(all_image_names[i]) for i in range(0, len(all_image_names), step)]
+    
+    # Reorder so specified image becomes the first (query) frame
+    if args.first_image_idx > 0 and args.first_image_idx < len(image_names):
+        # Move selected image to front, keep rest in order
+        selected = image_names[args.first_image_idx]
+        image_names = [selected] + [img for i, img in enumerate(image_names) if i != args.first_image_idx]
+        print(f"Using image at index {args.first_image_idx} as query frame (frame 0): {os.path.basename(selected)}")
+    elif args.first_image_idx >= len(image_names):
+        print(f"Warning: --first_image_idx {args.first_image_idx} >= num images {len(image_names)}, using index 0")
+    
     images = load_images(image_names)
     
     # copy images to output_dir / images
