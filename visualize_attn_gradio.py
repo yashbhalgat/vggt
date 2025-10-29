@@ -1,7 +1,7 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -148,6 +148,117 @@ def _click_to_query(x: int, y: int, H_ds: int, W_ds: int, H_img: int, W_img: int
     return qi
 
 
+def _generate_all_layers_overlays(qi: int, head_idx: Optional[int], layer_map: Dict[str, Path], image_paths: List[Path], opacity_value: float) -> List[Image.Image]:
+    """Generate overlays for all layers at once, grouped by layer (one composite per layer)."""
+    
+    composites: List[Image.Image] = []
+    
+    # Sort layers by name
+    sorted_layers = sorted(layer_map.items(), key=lambda x: x[0])
+    
+    for layer_name, meta_path in sorted_layers:
+        try:
+            meta = _load_metadata(meta_path)
+            _, data = _resolve_paths(meta, meta_path)
+            
+            if data["mode"] != "npz":
+                continue
+                
+            # Load npz
+            npz_loaded = np.load(data["path"], mmap_mode="r")
+            if hasattr(npz_loaded, "files"):
+                hm = npz_loaded["heatmaps"]
+            else:
+                hm = npz_loaded
+            
+            per_head = meta.get("per_head_data", False)
+            
+            # Handle per-head vs averaged data (same logic as main on_click)
+            if per_head and hm.ndim == 5:
+                if head_idx is not None:
+                    hm_query = hm[qi, head_idx]
+                else:
+                    # Average across heads
+                    per_head_vmax99_list = meta.get("per_head_vmax99", None)
+                    if per_head_vmax99_list and len(per_head_vmax99_list) == hm.shape[1]:
+                        num_heads = len(per_head_vmax99_list)
+                        raw_heads = []
+                        for h in range(num_heads):
+                            head_u8 = hm[qi, h]
+                            head_float = head_u8.astype(np.float32) / 255.0
+                            head_raw = head_float * per_head_vmax99_list[h]
+                            raw_heads.append(head_raw)
+                        avg_raw = np.mean(raw_heads, axis=0)
+                        avg_vmax = np.quantile(avg_raw, 0.99) if avg_raw.size > 0 else 1.0
+                        avg_norm = np.clip(avg_raw / (avg_vmax + 1e-8), 0.0, 1.0)
+                        hm_query = (avg_norm * 255.0).astype(np.uint8)
+                    else:
+                        hm_query = hm[qi].mean(axis=0).astype(np.uint8)
+            else:
+                Q = hm.shape[0]
+                if qi < 0 or qi >= Q:
+                    continue
+                hm_query = hm[qi]
+            
+            # Build jet LUT
+            lut = (cm.get_cmap("jet")(np.linspace(0, 1, 256))[:, :3] * 255.0).astype(np.uint8)
+            
+            # Generate overlays for all frames in this layer
+            layer_frames = []
+            for s, base_path in enumerate(image_paths):
+                base = Image.open(base_path).convert("RGB")
+                plane = hm_query[s]
+                
+                # Upsample to image size
+                im_small = Image.fromarray(plane, mode="L")
+                im_full = im_small.resize((base.width, base.height), resample=Image.NEAREST)
+                plane_full = np.array(im_full, dtype=np.uint8)
+                rgb = lut[plane_full]
+                alpha = plane_full
+                rgba = np.dstack([rgb, alpha])
+                heat = Image.fromarray(rgba, mode="RGBA")
+                over = _overlay_rgba_heatmap(base, heat, opacity=opacity_value)
+                
+                # Add frame label
+                draw = ImageDraw.Draw(over)
+                label = f"frame {s}"
+                draw.text((10, 10), label, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
+                
+                layer_frames.append(over)
+            
+            # Create vertical composite for this layer
+            if layer_frames:
+                # All frames should have same size
+                frame_width = layer_frames[0].width
+                frame_height = layer_frames[0].height
+                
+                # Create composite: all frames vertically stacked
+                title_height = 50
+                composite_width = frame_width
+                composite_height = title_height + (frame_height * len(layer_frames))
+                
+                composite = Image.new("RGB", (composite_width, composite_height), color=(40, 40, 40))
+                
+                # Add layer title at the top
+                draw = ImageDraw.Draw(composite)
+                title = f"{layer_name}"
+                draw.text((composite_width // 2, 25), title, fill=(255, 255, 255), 
+                         stroke_width=2, stroke_fill=(0, 0, 0), anchor="mm")
+                
+                # Paste frames vertically
+                for i, frame in enumerate(layer_frames):
+                    y_offset = title_height + (i * frame_height)
+                    composite.paste(frame, (0, y_offset))
+                
+                composites.append(composite)
+                
+        except Exception as e:
+            print(f"Error processing layer {layer_name}: {e}")
+            continue
+    
+    return composites
+
+
 def _get_vmax_info_html(meta: Dict[str, Any], head_selected: str = "Average") -> str:
     """Generate vmax info HTML based on metadata and selected head."""
     per_head = meta.get("per_head_data", False)
@@ -193,6 +304,7 @@ def build_interface():
             load_btn = gr.Button("Load")
 
         opacity = gr.Slider(0.0, 1.0, value=0.6, step=0.05, label="Overlay opacity")
+        show_all_layers = gr.Checkbox(label="Show all layers at once", value=False)
 
         # Top controls row: Layer selector + Head selector + vmax display
         with gr.Row():
@@ -208,7 +320,7 @@ def build_interface():
             with gr.Column(scale=3):
                 img_click = gr.Image(type="pil", label="Click a query patch on the first image", interactive=True)
             with gr.Column(scale=2):
-                gallery = gr.Gallery(label="Per-frame overlays", columns=5, rows=1, height=600)
+                gallery = gr.Gallery(label="Per-frame overlays", columns=5, rows=1, height=600, object_fit="contain")
 
         # Internal state
         state_meta = gr.State(value=None)  # current layer meta
@@ -295,7 +407,7 @@ def build_interface():
             outputs=[vmax_html],
         )
 
-        def on_click(img: Image.Image, meta: Dict[str, Any], data_state: Dict[str, Any], opacity_value: float, npz_loaded, image_paths, head_selected: str, evt: gr.SelectData):
+        def on_click(img: Image.Image, meta: Dict[str, Any], data_state: Dict[str, Any], opacity_value: float, npz_loaded, image_paths, head_selected: str, show_all: bool, layer_map: Dict[str, Path], evt: gr.SelectData):
             if meta is None or data_state is None:
                 raise gr.Error("Load metadata first")
             if image_paths is None:
@@ -314,6 +426,10 @@ def build_interface():
                 head_idx = int(head_selected.split()[-1]) - 1
             else:
                 head_idx = None  # Use average
+
+            # If show all layers, iterate through all layers
+            if show_all and layer_map:
+                return _generate_all_layers_overlays(qi, head_idx, layer_map, image_paths, opacity_value)
 
             overlays: List[Image.Image] = []
             if data_state["mode"] == "png":
@@ -389,7 +505,7 @@ def build_interface():
 
         img_click.select(
             fn=on_click,
-            inputs=[img_click, state_meta, state_data, opacity, state_npz, state_image_paths, head_select],
+            inputs=[img_click, state_meta, state_data, opacity, state_npz, state_image_paths, head_select, show_all_layers, state_layer_map],
             outputs=[gallery],
         )
 
