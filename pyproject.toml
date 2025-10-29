@@ -53,12 +53,12 @@ demo = { features = ["demo"], solve-group = "default" }
 
 [tool.pixi.tasks]
 
-# uv configuration for PyTorch with CUDA 12.4
+# uv configuration for PyTorch with CUDA
 [tool.uv]
 managed = true  # Let uv manage Python installation
 
 [tool.uv.sources]
-# Use CUDA 12.1 builds on Linux (2.3.1 not available in cu124), CPU-only builds on other platforms
+# Use CUDA 12.1
 torch = [
     { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
     { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
