@@ -162,11 +162,13 @@ def build_interface():
 
         opacity = gr.Slider(0.0, 1.0, value=0.6, step=0.05, label="Overlay opacity")
 
-        # Top controls row: small Layer selector + big vmax display
+        # Top controls row: Layer selector + Head selector + vmax display
         with gr.Row():
             with gr.Column(scale=1):
                 layer_select = gr.Dropdown(label="Layer", choices=[], value=None, interactive=True)
-            with gr.Column(scale=4):
+            with gr.Column(scale=1):
+                head_select = gr.Dropdown(label="Head", choices=["Average"], value="Average", interactive=True)
+            with gr.Column(scale=3):
                 vmax_html = gr.HTML(value="")
 
         # Content row: query image (left, large) | per-frame overlays (right, smaller)
@@ -184,7 +186,7 @@ def build_interface():
         state_image_paths = gr.State(value=None)  # resolved absolute image paths
 
         def on_load(meta_or_dir_path: str):
-            mp = Path(meta_or_dir_path)
+            mp = Path(meta_or_dir_path.strip())
             if not mp.exists():
                 raise gr.Error(f"Path not found: {mp}")
             options, layer_map = _discover_layers(mp)
@@ -204,12 +206,21 @@ def build_interface():
             if data["mode"] == "npz":
                 # Load lazily with mmap (works for both .npz and .npy)
                 npz_loaded = np.load(data["path"], mmap_mode="r")
-            return first_img_grid, meta, data, gr.update(value=None), info, gr.update(choices=options, value=selected), layer_map, npz_loaded, image_paths
+            
+            # Setup head selector
+            per_head = meta.get("per_head_data", False)
+            if per_head:
+                num_heads = meta.get("num_heads", 16)
+                head_choices = ["Average"] + [f"Head {i+1}" for i in range(num_heads)]
+            else:
+                head_choices = ["Average"]
+            
+            return first_img_grid, meta, data, gr.update(value=None), info, gr.update(choices=options, value=selected), layer_map, npz_loaded, image_paths, gr.update(choices=head_choices, value="Average")
 
         load_btn.click(
             fn=on_load,
             inputs=[metadata_tb],
-            outputs=[img_click, state_meta, state_data, gallery, vmax_html, layer_select, state_layer_map, state_npz, state_image_paths],
+            outputs=[img_click, state_meta, state_data, gallery, vmax_html, layer_select, state_layer_map, state_npz, state_image_paths, head_select],
         )
 
         def on_change_layer(layer_name: str, layer_map: Dict[str, str]):
@@ -224,15 +235,24 @@ def build_interface():
             npz_loaded = None
             if data["mode"] == "npz":
                 npz_loaded = np.load(data["path"], mmap_mode="r")
-            return first_img_grid, meta, data, gr.update(value=None), info, npz_loaded, image_paths
+            
+            # Setup head selector
+            per_head = meta.get("per_head_data", False)
+            if per_head:
+                num_heads = meta.get("num_heads", 16)
+                head_choices = ["Average"] + [f"Head {i+1}" for i in range(num_heads)]
+            else:
+                head_choices = ["Average"]
+            
+            return first_img_grid, meta, data, gr.update(value=None), info, npz_loaded, image_paths, gr.update(choices=head_choices, value="Average")
 
         layer_select.change(
             fn=on_change_layer,
             inputs=[layer_select, state_layer_map],
-            outputs=[img_click, state_meta, state_data, gallery, vmax_html, state_npz, state_image_paths],
+            outputs=[img_click, state_meta, state_data, gallery, vmax_html, state_npz, state_image_paths, head_select],
         )
 
-        def on_click(img: Image.Image, meta: Dict[str, Any], data_state: Dict[str, Any], opacity_value: float, npz_loaded, image_paths, evt: gr.SelectData):
+        def on_click(img: Image.Image, meta: Dict[str, Any], data_state: Dict[str, Any], opacity_value: float, npz_loaded, image_paths, head_selected: str, evt: gr.SelectData):
             if meta is None or data_state is None:
                 raise gr.Error("Load metadata first")
             if image_paths is None:
@@ -243,6 +263,14 @@ def build_interface():
             # evt.index is (x, y) in pixels for gr.Image.select
             x, y = evt.index
             qi = _click_to_query(x, y, meta["H_ds"], meta["W_ds"], base0.height, base0.width)
+
+            # Parse head selection
+            per_head = meta.get("per_head_data", False)
+            if per_head and head_selected != "Average":
+                # Extract head index from "Head X" format
+                head_idx = int(head_selected.split()[-1]) - 1
+            else:
+                head_idx = None  # Use average
 
             overlays: List[Image.Image] = []
             if data_state["mode"] == "png":
@@ -261,17 +289,29 @@ def build_interface():
                     npz_loaded = np.load(data_state["path"], mmap_mode="r")
                 # Support .npz (dict-like) and .npy (ndarray)
                 if hasattr(npz_loaded, "files"):
-                    hm = npz_loaded["heatmaps"]  # uint8 [Q,S,Hq,Wq]
+                    hm = npz_loaded["heatmaps"]  # uint8 [Q,S,Hq,Wq] or [Q,H,S,Hq,Wq]
                 else:
-                    hm = npz_loaded  # uint8 [Q,S,Hq,Wq]
-                Q = hm.shape[0]
-                if qi < 0 or qi >= Q:
-                    return []
+                    hm = npz_loaded  # uint8 [Q,S,Hq,Wq] or [Q,H,S,Hq,Wq]
+                
+                # Handle per-head vs averaged data
+                if per_head and hm.ndim == 5:  # [Q, num_heads, S, Hq, Wq]
+                    if head_idx is not None:
+                        # Select specific head
+                        hm_query = hm[qi, head_idx]  # [S, Hq, Wq]
+                    else:
+                        # Average across heads
+                        hm_query = hm[qi].mean(axis=0).astype(np.uint8)  # [S, Hq, Wq]
+                else:  # [Q, S, Hq, Wq]
+                    Q = hm.shape[0]
+                    if qi < 0 or qi >= Q:
+                        return []
+                    hm_query = hm[qi]  # [S, Hq, Wq]
+                
                 # Build jet LUT
                 lut = (cm.get_cmap("jet")(np.linspace(0, 1, 256))[:, :3] * 255.0).astype(np.uint8)
                 for s, base_path in enumerate(image_paths):
                     base = Image.open(base_path).convert("RGB")
-                    plane = hm[qi, s]  # uint8 [Hq,Wq]
+                    plane = hm_query[s]  # uint8 [Hq,Wq]
                     # Blockwise upsample (nearest neighbor) to image size
                     im_small = Image.fromarray(plane, mode="L")
                     im_full = im_small.resize((base.width, base.height), resample=Image.NEAREST)
@@ -286,7 +326,7 @@ def build_interface():
 
         img_click.select(
             fn=on_click,
-            inputs=[img_click, state_meta, state_data, opacity, state_npz, state_image_paths],
+            inputs=[img_click, state_meta, state_data, opacity, state_npz, state_image_paths, head_select],
             outputs=[gallery],
         )
 

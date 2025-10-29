@@ -38,6 +38,7 @@ def _save_layer_npz(
     stride_w: int,
     H_p: int,
     W_p: int,
+    num_heads: int = None,
 ) -> Dict[str, Any]:
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -50,7 +51,19 @@ def _save_layer_npz(
     img_sizes = [{"width": W_img, "height": H_img} for _ in pil_images]
 
     # Determine downsampled grid size from one grid
-    S, H_ds, W_ds = grids[0].shape if len(grids) > 0 else (len(image_paths), 0, 0)
+    # grids can be either [S, H_ds, W_ds] or [num_heads, S, H_ds, W_ds]
+    if len(grids) > 0:
+        if grids[0].ndim == 4:  # per-head data: [num_heads, S, H_ds, W_ds]
+            num_heads_detected, S, H_ds, W_ds = grids[0].shape
+            per_head_data = True
+            if num_heads is None:
+                num_heads = num_heads_detected
+        else:  # averaged data: [S, H_ds, W_ds]
+            S, H_ds, W_ds = grids[0].shape
+            per_head_data = False
+    else:
+        S, H_ds, W_ds = len(image_paths), 0, 0
+        per_head_data = False
 
     # Compute layerwise vmax (99th percentile) across all grids
     def quantile_99(a: np.ndarray) -> float:
@@ -64,14 +77,16 @@ def _save_layer_npz(
     else:
         layer_vmax99 = 1.0
 
-    # Stack to [Q, S, H_ds, W_ds]
+    # Stack grids
     Q = len(grids)
     stacked = np.stack(grids, axis=0).astype(np.float32)
+    # Shape: [Q, S, H_ds, W_ds] or [Q, num_heads, S, H_ds, W_ds]
+    
     # Normalize by layerwise vmax
     stacked = np.clip(stacked / (layer_vmax99 + 1e-8), 0.0, 1.0)
 
     # Quantize at low-res grid (H_ds x W_ds); no upsampling here
-    heatmaps_u8 = (stacked * 255.0 + 0.5).astype(np.uint8)  # [Q,S,H_ds,W_ds]
+    heatmaps_u8 = (stacked * 255.0 + 0.5).astype(np.uint8)
 
     # Save single compressed NPZ
     npz_path = out_root / "heatmaps_uint8.npz"
@@ -88,6 +103,7 @@ def _save_layer_npz(
         "W_ds": int(W_ds),
         "layer_vmax99": float(layer_vmax99),
         "normalized_by": "layer_vmax99",
+        "per_head_data": per_head_data,
         # store npz path relative to attn_maps dir to avoid double prefixing when loading
         "npz_path": os.path.relpath(str(npz_path), start=str(out_root.parent)),
         # store paths relative to attn_maps dir, even if images are in a sibling dir
@@ -95,6 +111,8 @@ def _save_layer_npz(
         "image_sizes": img_sizes,
         # Query grid indexing info (qr, qc) can be derived on the fly
     }
+    if per_head_data:
+        metadata["num_heads"] = int(num_heads)
     return metadata
 
 
@@ -106,6 +124,7 @@ def compute_layerwise_attentions(
     stride_h: int = 1,
     stride_w: int = 1,
     max_query_chunk: int = 2048,
+    save_per_head: bool = False,
 ):
     was_training = model.training
     model.eval()
@@ -117,6 +136,7 @@ def compute_layerwise_attentions(
         stride_h=stride_h,
         stride_w=stride_w,
         max_query_chunk=max_query_chunk,
+        save_per_head=save_per_head,
     )
     capturer.register()
 
@@ -152,7 +172,7 @@ def compute_layerwise_attentions(
     manifest = {"image_set_name": image_set_name, "layers": []}
 
     for li in sorted(capturer._layer_grids.keys()):
-        grids = capturer._layer_grids[li]  # List[np.ndarray] length Q, each [S, H_ds, W_ds]
+        grids = capturer._layer_grids[li]  # List[np.ndarray] length Q, each [S, H_ds, W_ds] or [num_heads, S, H_ds, W_ds]
         layer_dir = attn_root / f"layer_{li + 1:02d}"
         metadata = _save_layer_npz(
             grids=grids,
@@ -162,6 +182,7 @@ def compute_layerwise_attentions(
             stride_w=stride_w,
             H_p=H_p,
             W_p=W_p,
+            num_heads=capturer._num_heads,
         )
         metadata_path = attn_root / f"layer_{li + 1:02d}_metadata.json"
         with open(metadata_path, "w") as f:
@@ -193,6 +214,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir_prefix", type=str, default="attn_first2all_")
     parser.add_argument("--stride_h", type=int, default=1)
     parser.add_argument("--stride_w", type=int, default=1)
+    # image extension
+    parser.add_argument("--image_extension", type=str, default="png")
+    parser.add_argument("--save_per_head", action="store_true", help="Save per-head attention maps (increases storage ~16x)")
     args = parser.parse_args()
     
     output_dir = args.output_dir_prefix + args.image_set_name
@@ -204,7 +228,7 @@ if __name__ == "__main__":
     else:
         image_dir = Path(f"examples/{args.image_set_name}/images")
     print(f"Image directory: {image_dir}")
-    all_image_names = [f for f in image_dir.glob("*.png")]
+    all_image_names = [f for f in image_dir.glob(f"*.{args.image_extension}")]
     step = len(all_image_names) // args.num_images
     print(f"Total images: {len(all_image_names)}, step: {step}")
     # take every step-th image
@@ -224,6 +248,7 @@ if __name__ == "__main__":
         stride_h=args.stride_h,
         stride_w=args.stride_w,
         max_query_chunk=2048,
+        save_per_head=args.save_per_head,
     )
     print(manifest_path)
     

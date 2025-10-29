@@ -395,6 +395,7 @@ class FirstToAllAttentionCapture:
         stride_h: int = 1,
         stride_w: int = 1,
         max_query_chunk: int = 2048,
+        save_per_head: bool = False,
     ) -> None:
         self.model = model
         self.image_set_name = image_set_name
@@ -402,10 +403,12 @@ class FirstToAllAttentionCapture:
         self.stride_h = max(1, int(stride_h))
         self.stride_w = max(1, int(stride_w))
         self.max_query_chunk = max(1, int(max_query_chunk))
+        self.save_per_head = save_per_head
 
         self._handles: List = []
-        # For each layer we will store a list of (H' * W') heatmaps, each shaped [S, H', W']
+        # For each layer we will store a list of (H' * W') heatmaps, each shaped [S, H', W'] (or [num_heads, S, H', W'] if save_per_head=True)
         self._layer_grids: Dict[int, List[np.ndarray]] = {}
+        self._num_heads: Optional[int] = None
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -469,20 +472,36 @@ class FirstToAllAttentionCapture:
             # We will build a per-query map shaped [S, H_ds, W_ds] for each query in frame 0
             grids: List[np.ndarray] = []
 
+            # Store num_heads for metadata
+            if self._num_heads is None:
+                self._num_heads = q_sel.shape[1]
+
             for start in range(0, Q, self.max_query_chunk):
                 stop = min(Q, start + self.max_query_chunk)
                 # logits: [B, H, chunk, K]
                 logits = torch.einsum("bhqd,bhkd->bhqk", q_sel[:, :, start:stop, :], k_sel) / math.sqrt(head_dim)
                 probs = torch.softmax(logits, dim=-1)
-                # mean over batch and heads -> [chunk, K]
-                probs_mean = probs.mean(dim=(0, 1))
-                # Split K back into S blocks of size per_frame and reshape to [S, H_ds, W_ds]
-                probs_blocks = probs_mean.split(per_frame, dim=-1)
-                for q_local in range(probs_blocks[0].shape[0]):
-                    # q_local iterates per query inside the current chunk
-                    flat = torch.stack([b[q_local] for b in probs_blocks], dim=0)  # [S, per_frame]
-                    grid = flat.reshape(S, H_ds, W_ds).detach().cpu().numpy()
-                    grids.append(grid)
+                
+                if self.save_per_head:
+                    # mean over batch only -> [H, chunk, K]
+                    probs_mean = probs.mean(dim=0)
+                    # Split K back into S blocks of size per_frame
+                    probs_blocks = probs_mean.split(per_frame, dim=-1)  # List of [H, chunk, per_frame]
+                    for q_local in range(probs_blocks[0].shape[1]):
+                        # q_local iterates per query inside the current chunk
+                        flat = torch.stack([b[:, q_local, :] for b in probs_blocks], dim=1)  # [H, S, per_frame]
+                        grid = flat.reshape(self._num_heads, S, H_ds, W_ds).detach().cpu().numpy()
+                        grids.append(grid)
+                else:
+                    # mean over batch and heads -> [chunk, K]
+                    probs_mean = probs.mean(dim=(0, 1))
+                    # Split K back into S blocks of size per_frame and reshape to [S, H_ds, W_ds]
+                    probs_blocks = probs_mean.split(per_frame, dim=-1)
+                    for q_local in range(probs_blocks[0].shape[0]):
+                        # q_local iterates per query inside the current chunk
+                        flat = torch.stack([b[q_local] for b in probs_blocks], dim=0)  # [S, per_frame]
+                        grid = flat.reshape(S, H_ds, W_ds).detach().cpu().numpy()
+                        grids.append(grid)
 
             self._layer_grids[layer_index] = grids  # length Q = H_ds*W_ds
 
