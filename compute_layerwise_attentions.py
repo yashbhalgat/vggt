@@ -65,27 +65,39 @@ def _save_layer_npz(
         S, H_ds, W_ds = len(image_paths), 0, 0
         per_head_data = False
 
-    # Compute layerwise vmax (99th percentile) across all grids
+    # Compute vmax statistics (99th percentile) for metadata
     def quantile_99(a: np.ndarray) -> float:
         if a.size == 0:
             return 1.0
         return float(np.quantile(a, 0.99))
-
-    if len(grids) > 0:
-        flat_all = np.concatenate([g.reshape(-1) for g in grids], axis=0)
-        layer_vmax99 = quantile_99(flat_all)
-    else:
-        layer_vmax99 = 1.0
 
     # Stack grids
     Q = len(grids)
     stacked = np.stack(grids, axis=0).astype(np.float32)
     # Shape: [Q, S, H_ds, W_ds] or [Q, num_heads, S, H_ds, W_ds]
     
-    # Normalize by layerwise vmax
-    stacked = np.clip(stacked / (layer_vmax99 + 1e-8), 0.0, 1.0)
-
-    # Quantize at low-res grid (H_ds x W_ds); no upsampling here
+    # Compute vmax statistics for metadata
+    if len(grids) > 0:
+        flat_all = np.concatenate([g.reshape(-1) for g in grids], axis=0)
+        layer_vmax99 = quantile_99(flat_all)
+    else:
+        layer_vmax99 = 1.0
+    
+    if per_head_data:
+        # Normalize each head by its own vmax for optimal uint8 quantization
+        per_head_vmax99 = []
+        for h in range(num_heads):
+            head_data = stacked[:, h, :, :, :]  # [Q, S, H_ds, W_ds]
+            head_vmax = quantile_99(head_data)
+            per_head_vmax99.append(head_vmax)
+            # Normalize this head by its own vmax
+            stacked[:, h, :, :, :] = np.clip(head_data / (head_vmax + 1e-8), 0.0, 1.0)
+    else:
+        per_head_vmax99 = None
+        # Normalize by global layer vmax for non-per-head data
+        stacked = np.clip(stacked / (layer_vmax99 + 1e-8), 0.0, 1.0)
+    
+    # Quantize to uint8
     heatmaps_u8 = (stacked * 255.0 + 0.5).astype(np.uint8)
 
     # Save single compressed NPZ
@@ -102,7 +114,7 @@ def _save_layer_npz(
         "H_ds": int(H_ds),
         "W_ds": int(W_ds),
         "layer_vmax99": float(layer_vmax99),
-        "normalized_by": "layer_vmax99",
+        "normalized_by": "per_head_vmax99" if per_head_data else "layer_vmax99",
         "per_head_data": per_head_data,
         # store npz path relative to attn_maps dir to avoid double prefixing when loading
         "npz_path": os.path.relpath(str(npz_path), start=str(out_root.parent)),
@@ -113,6 +125,7 @@ def _save_layer_npz(
     }
     if per_head_data:
         metadata["num_heads"] = int(num_heads)
+        metadata["per_head_vmax99"] = [float(v) for v in per_head_vmax99]
     return metadata
 
 

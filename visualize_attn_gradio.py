@@ -201,7 +201,14 @@ def build_interface():
 
             first_img = Image.open(image_paths[0]).convert("RGB")
             first_img_grid = _draw_grid_on_image(first_img, meta["H_ds"], meta["W_ds"], line_color=(0, 255, 0), alpha=0.6)
-            info = f"<div style=\"font-size: 48px; font-weight: 800;\">vmax (99%): {meta.get('layer_vmax99', 1.0):.4f}</div>"
+            
+            # Display vmax info
+            per_head_check = meta.get("per_head_data", False)
+            if per_head_check:
+                info = f"<div style=\"font-size: 32px; font-weight: 800;\">Per-head data (renormalized per head in viz)</div>"
+            else:
+                info = f"<div style=\"font-size: 48px; font-weight: 800;\">vmax (99%): {meta.get('layer_vmax99', 1.0):.4f}</div>"
+            
             npz_loaded = None
             if data["mode"] == "npz":
                 # Load lazily with mmap (works for both .npz and .npy)
@@ -231,7 +238,14 @@ def build_interface():
             image_paths, data = _resolve_paths(meta, meta_path)
             first_img = Image.open(image_paths[0]).convert("RGB")
             first_img_grid = _draw_grid_on_image(first_img, meta["H_ds"], meta["W_ds"], line_color=(0, 255, 0), alpha=0.6)
-            info = f"<div style=\"font-size: 48px; font-weight: 800;\">vmax (99%): {meta.get('layer_vmax99', 1.0):.4f}</div>"
+            
+            # Display vmax info
+            per_head = meta.get("per_head_data", False)
+            if per_head:
+                info = f"<div style=\"font-size: 48px; font-weight: 800;\">Per-head normalization</div>"
+            else:
+                info = f"<div style=\"font-size: 48px; font-weight: 800;\">vmax (99%): {meta.get('layer_vmax99', 1.0):.4f}</div>"
+            
             npz_loaded = None
             if data["mode"] == "npz":
                 npz_loaded = np.load(data["path"], mmap_mode="r")
@@ -296,11 +310,31 @@ def build_interface():
                 # Handle per-head vs averaged data
                 if per_head and hm.ndim == 5:  # [Q, num_heads, S, Hq, Wq]
                     if head_idx is not None:
-                        # Select specific head
-                        hm_query = hm[qi, head_idx]  # [S, Hq, Wq]
+                        # Select specific head - already normalized to its own vmax, just use it
+                        hm_query = hm[qi, head_idx]  # [S, Hq, Wq] uint8
                     else:
-                        # Average across heads
-                        hm_query = hm[qi].mean(axis=0).astype(np.uint8)  # [S, Hq, Wq]
+                        # Average across heads: need to denormalize each head first
+                        per_head_vmax99_list = meta.get("per_head_vmax99", None)
+                        if per_head_vmax99_list and len(per_head_vmax99_list) == hm.shape[1]:
+                            # Denormalize each head back to raw scale, then average
+                            num_heads = len(per_head_vmax99_list)
+                            raw_heads = []
+                            for h in range(num_heads):
+                                head_u8 = hm[qi, h]  # [S, Hq, Wq]
+                                head_float = head_u8.astype(np.float32) / 255.0  # [0, 1]
+                                head_raw = head_float * per_head_vmax99_list[h]  # back to raw scale
+                                raw_heads.append(head_raw)
+                            
+                            # Average in raw scale
+                            avg_raw = np.mean(raw_heads, axis=0)  # [S, Hq, Wq]
+                            
+                            # Renormalize by the average's own 99th percentile
+                            avg_vmax = np.quantile(avg_raw, 0.99) if avg_raw.size > 0 else 1.0
+                            avg_norm = np.clip(avg_raw / (avg_vmax + 1e-8), 0.0, 1.0)
+                            hm_query = (avg_norm * 255.0).astype(np.uint8)
+                        else:
+                            # Fallback: just average the uint8 values
+                            hm_query = hm[qi].mean(axis=0).astype(np.uint8)
                 else:  # [Q, S, Hq, Wq]
                     Q = hm.shape[0]
                     if qi < 0 or qi >= Q:
