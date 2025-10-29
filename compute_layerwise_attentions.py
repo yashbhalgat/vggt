@@ -242,7 +242,7 @@ if __name__ == "__main__":
     else:
         image_dir = Path(f"examples/{args.image_set_name}/images")
     print(f"Image directory: {image_dir}")
-    all_image_names = [f for f in image_dir.glob(f"*.{args.image_extension}")]
+    all_image_names = sorted([f for f in image_dir.glob(f"*.{args.image_extension}")])
     step = len(all_image_names) // args.num_images
     print(f"Total images: {len(all_image_names)}, step: {step}")
     # take every step-th image
@@ -259,10 +259,14 @@ if __name__ == "__main__":
     
     images = load_images(image_names)
     
-    # copy images to output_dir / images
+    # copy images to output_dir / images with frame numbering to preserve order
     os.makedirs(Path(output_dir) / "images", exist_ok=True)
-    for image_name in image_names:
-        shutil.copy(image_name, Path(output_dir) / "images" / os.path.basename(image_name))
+    for frame_idx, image_name in enumerate(image_names):
+        # Use frame_XX naming to preserve processing order
+        ext = os.path.splitext(image_name)[1]
+        dest_name = f"frame_{frame_idx:02d}{ext}"
+        shutil.copy(image_name, Path(output_dir) / "images" / dest_name)
+        print(f"Frame {frame_idx}: {os.path.basename(image_name)} -> {dest_name}")
     
     manifest_path = compute_layerwise_attentions(
         model,
