@@ -1,6 +1,8 @@
 [project]
 authors = [{name = "Jianyuan Wang", email = "jianyuan@robots.ox.ac.uk"}]
 dependencies = [
+    "torch>=2.3.1,<2.4",
+    "torchvision>=0.18.1,<0.19",
     "numpy<2",
     "Pillow",
     "huggingface_hub",
@@ -9,12 +11,12 @@ dependencies = [
     "opencv-python",
 ]
 name = "vggt"
-requires-python = ">= 3.10"
+requires-python = ">=3.10,<3.13"
 version = "0.0.1"
 
 [project.optional-dependencies]
 demo = [
-    "gradio==5.17.1",
+    "gradio>=5.18.0",
     "viser==0.2.23",
     "tqdm",
     "hydra-core",
@@ -50,3 +52,28 @@ default = { solve-group = "default" }
 demo = { features = ["demo"], solve-group = "default" }
 
 [tool.pixi.tasks]
+
+# uv configuration for PyTorch with CUDA 12.4
+[tool.uv]
+managed = true  # Let uv manage Python installation
+
+[tool.uv.sources]
+# Use CUDA 12.1 builds on Linux (2.3.1 not available in cu124), CPU-only builds on other platforms
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true  # Only use for PyTorch packages
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true  # Only use for PyTorch packages
