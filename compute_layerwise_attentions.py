@@ -75,34 +75,27 @@ def _save_layer_npz(
     Q = len(grids)
     stacked = np.stack(grids, axis=0).astype(np.float32)
     # Shape: [Q, S, H_ds, W_ds] or [Q, num_heads, S, H_ds, W_ds]
-    
-    # Compute vmax statistics for metadata
+
+    # Compute vmax statistics for metadata (from raw values)
     if len(grids) > 0:
         flat_all = np.concatenate([g.reshape(-1) for g in grids], axis=0)
         layer_vmax99 = quantile_99(flat_all)
     else:
         layer_vmax99 = 1.0
-    
+
     if per_head_data:
-        # Normalize each head by its own vmax for optimal uint8 quantization
+        # Compute per-head vmax statistics (from raw values)
         per_head_vmax99 = []
         for h in range(num_heads):
             head_data = stacked[:, h, :, :, :]  # [Q, S, H_ds, W_ds]
             head_vmax = quantile_99(head_data)
             per_head_vmax99.append(head_vmax)
-            # Normalize this head by its own vmax
-            stacked[:, h, :, :, :] = np.clip(head_data / (head_vmax + 1e-8), 0.0, 1.0)
     else:
         per_head_vmax99 = None
-        # Normalize by global layer vmax for non-per-head data
-        stacked = np.clip(stacked / (layer_vmax99 + 1e-8), 0.0, 1.0)
-    
-    # Quantize to uint8
-    heatmaps_u8 = (stacked * 255.0 + 0.5).astype(np.uint8)
 
-    # Save single compressed NPZ
-    npz_path = out_root / "heatmaps_uint8.npz"
-    np.savez_compressed(npz_path, heatmaps=heatmaps_u8)
+    # Save RAW float16 values (no normalization, no quantization), no compression
+    npz_path = out_root / "heatmaps_raw_float16.npz"
+    np.savez(npz_path, heatmaps=stacked.astype(np.float16))
 
     # Build metadata
     metadata = {
@@ -114,13 +107,14 @@ def _save_layer_npz(
         "H_ds": int(H_ds),
         "W_ds": int(W_ds),
         "layer_vmax99": float(layer_vmax99),
-        "normalized_by": "per_head_vmax99" if per_head_data else "layer_vmax99",
+        "normalized_by": "none",
         "per_head_data": per_head_data,
         # store npz path relative to attn_maps dir to avoid double prefixing when loading
         "npz_path": os.path.relpath(str(npz_path), start=str(out_root.parent)),
         # store paths relative to attn_maps dir, even if images are in a sibling dir
         "image_paths": [os.path.relpath(str(p), start=str(out_root.parent)) for p in image_paths],
         "image_sizes": img_sizes,
+        "heatmaps_dtype": "float16",
         # Query grid indexing info (qr, qc) can be derived on the fly
     }
     if per_head_data:

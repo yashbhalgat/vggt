@@ -169,48 +169,67 @@ def _create_jet_lut() -> np.ndarray:
 def _get_heatmap_query(hm: np.ndarray, qi: int, head_idx: Optional[int], meta: Dict[str, Any]) -> Optional[np.ndarray]:
     """
     Extract heatmap data for a query, handling per-head vs averaged data.
-    
-    Returns:
-        np.ndarray of shape [S, Hq, Wq] (uint8) or None if invalid query index
+    Always returns uint8 displayable heatmaps of shape [S, Hq, Wq].
     """
     per_head = meta.get("per_head_data", False)
-    
+    normalized_by = meta.get("normalized_by", "layer_vmax99")
+    is_uint8 = np.issubdtype(hm.dtype, np.uint8)
+    is_raw = (normalized_by == "none") or (not is_uint8)
+
     if per_head and hm.ndim == 5:  # [Q, num_heads, S, Hq, Wq]
         Q = hm.shape[0]
         if qi < 0 or qi >= Q:
             return None
-            
+
         if head_idx is not None:
-            # Select specific head - already normalized to its own vmax
-            hm_query = hm[qi, head_idx]  # [S, Hq, Wq] uint8
+            if is_raw:
+                # Normalize selected head by its 99th percentile
+                per_head_vmax99_list = meta.get("per_head_vmax99", [])
+                head_vmax = per_head_vmax99_list[head_idx] if head_idx < len(per_head_vmax99_list) else (float(np.quantile(hm[qi, head_idx], 0.99)) if hm[qi, head_idx].size > 0 else 1.0)
+                head_raw = hm[qi, head_idx].astype(np.float32)
+                head_norm = np.clip(head_raw / (head_vmax + 1e-8), 0.0, 1.0)
+                hm_query = (head_norm * 255.0).astype(np.uint8)
+            else:
+                # Already per-head normalized uint8
+                hm_query = hm[qi, head_idx]
         else:
-            # Average across heads: denormalize each head first
-            per_head_vmax99_list = meta.get("per_head_vmax99", None)
-            if per_head_vmax99_list and len(per_head_vmax99_list) == hm.shape[1]:
-                num_heads = len(per_head_vmax99_list)
-                raw_heads = []
-                for h in range(num_heads):
-                    head_u8 = hm[qi, h]  # [S, Hq, Wq]
-                    head_float = head_u8.astype(np.float32) / 255.0  # [0, 1]
-                    head_raw = head_float * per_head_vmax99_list[h]  # back to raw scale
-                    raw_heads.append(head_raw)
-                
-                # Average in raw scale
-                avg_raw = np.mean(raw_heads, axis=0)  # [S, Hq, Wq]
-                
-                # Renormalize by the average's own 99th percentile
-                avg_vmax = np.quantile(avg_raw, 0.99) if avg_raw.size > 0 else 1.0
+            # Average view across heads
+            if is_raw:
+                # Average raw heads, then normalize by its own 99th percentile
+                raw_heads = hm[qi].astype(np.float32)  # [num_heads, S, Hq, Wq]
+                avg_raw = np.mean(raw_heads, axis=0)
+                avg_vmax = float(np.quantile(avg_raw, 0.99)) if avg_raw.size > 0 else 1.0
                 avg_norm = np.clip(avg_raw / (avg_vmax + 1e-8), 0.0, 1.0)
                 hm_query = (avg_norm * 255.0).astype(np.uint8)
             else:
-                # Fallback: just average the uint8 values
-                hm_query = hm[qi].mean(axis=0).astype(np.uint8)
+                # Denormalize each head using per_head_vmax, average in raw, renormalize
+                per_head_vmax99_list = meta.get("per_head_vmax99", None)
+                if per_head_vmax99_list and len(per_head_vmax99_list) == hm.shape[1]:
+                    num_heads = len(per_head_vmax99_list)
+                    raw_heads = []
+                    for h in range(num_heads):
+                        head_u8 = hm[qi, h]  # [S, Hq, Wq]
+                        head_float = head_u8.astype(np.float32) / 255.0
+                        head_raw = head_float * per_head_vmax99_list[h]
+                        raw_heads.append(head_raw)
+                    avg_raw = np.mean(raw_heads, axis=0)
+                    avg_vmax = np.quantile(avg_raw, 0.99) if avg_raw.size > 0 else 1.0
+                    avg_norm = np.clip(avg_raw / (avg_vmax + 1e-8), 0.0, 1.0)
+                    hm_query = (avg_norm * 255.0).astype(np.uint8)
+                else:
+                    hm_query = hm[qi].mean(axis=0).astype(np.uint8)
     else:  # [Q, S, Hq, Wq]
         Q = hm.shape[0]
         if qi < 0 or qi >= Q:
             return None
-        hm_query = hm[qi]  # [S, Hq, Wq]
-    
+        if is_raw:
+            plane_raw = hm[qi].astype(np.float32)
+            layer_vmax = meta.get("layer_vmax99", float(np.quantile(plane_raw, 0.99)) if plane_raw.size > 0 else 1.0)
+            plane_norm = np.clip(plane_raw / (layer_vmax + 1e-8), 0.0, 1.0)
+            hm_query = (plane_norm * 255.0).astype(np.uint8)
+        else:
+            hm_query = hm[qi]
+
     return hm_query
 
 
@@ -290,6 +309,9 @@ def _generate_all_heads_overlays(qi: int, meta: Dict[str, Any], data_state: Dict
     
     # Load npz
     hm, npz_loaded = _load_npz_data(data_state, npz_loaded)
+    normalized_by = meta.get("normalized_by", "layer_vmax99")
+    is_uint8 = np.issubdtype(hm.dtype, np.uint8)
+    is_raw = (normalized_by == "none") or (not is_uint8)
     
     if hm.ndim != 5:  # Must be per-head data [Q, num_heads, S, Hq, Wq]
         return []
@@ -304,7 +326,14 @@ def _generate_all_heads_overlays(qi: int, meta: Dict[str, Any], data_state: Dict
     # Iterate through all heads
     for head_idx in range(num_heads):
         try:
-            hm_query = hm[qi, head_idx]  # [S, Hq, Wq]
+            # Per-head view: either already uint8 normalized or raw needing normalization
+            if is_raw:
+                head_raw = hm[qi, head_idx].astype(np.float32)
+                head_vmax = per_head_vmax99_list[head_idx] if head_idx < len(per_head_vmax99_list) else (float(np.quantile(head_raw, 0.99)) if head_raw.size > 0 else 1.0)
+                head_norm = np.clip(head_raw / (head_vmax + 1e-8), 0.0, 1.0)
+                hm_query = (head_norm * 255.0).astype(np.uint8)
+            else:
+                hm_query = hm[qi, head_idx]  # [S, Hq, Wq] uint8
             
             # Generate overlays for all frames with this head
             head_frames = []
